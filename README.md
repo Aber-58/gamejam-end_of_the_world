@@ -20,7 +20,8 @@ Dann <http://localhost:8000> öffnen. Für den Test auf dem Handy im selben WLAN
 |---------|-------|
 | Treten  | **A / D** abwechselnd (gleiche Taste mehrfach zählt nicht) |
 | Lenken  | **← / →** (Kurven drücken nach außen, abseits der Straße bremst) |
-| E-Bike  | **Leertaste** halten: Zusatztempo ohne Tippen, Akku 6 s (lädt in ~30 s). Nach 5 s Gesamtnutzung erkennt Strava den Motor: +0:30, einmal pro Run. Der Guard gilt auch mit Motor |
+| E-Bike  | **Leertaste** oder **E** schaltet durch: AUS, ECO, TOUR, SPORT, TURBO (+8/15/25/35 % Tempo, der Guard cappt trotzdem). Akku je Modus unterschiedlich schnell leer (TURBO ~5 s), lädt in AUS nach. Jedes Umschalten: peinlicher Toast (`ebike_lines` in `lines.js`), Beep, Albert grinst und lästert. Der Balken PEINLICH füllt sich; bei 100 % erkennt Strava das E-Bike: +0:30, Screenshake (einmal pro Run) |
+| Flow    | Sauberes, schnelles A/D-Wechseln füllt den FLOW-Balken; ab 60 % +5 % Tempo (der Guard gilt weiter), falsche Taste oder zu langsam bricht ihn ab |
 | Neustart | **R** (Bestzeit liegt in localStorage, nie unter 40:01) |
 | Ton     | M |
 
@@ -48,6 +49,12 @@ erst, wenn alle PNGs geladen sind (oder ihr Laden fehlgeschlagen ist).
 - Die alten Seitenansicht-Sprites (`marko_*`, `albert_ride`, `cow`, `hiker`, `kevin` ...) werden nicht mehr geladen.
 
 Fehlt ein PNG, zeichnet `drawBillboard` ersatzweise eine farbige Box.
+
+## Sound
+
+Alles per WebAudio, keine Dateien, Start erst nach der ersten Eingabe: Chiptune-Loop (`Music`: Bass, Arpeggio, Kick),
+der mit dem Fortschritt schneller und verzerrter wird; Tretklicken, Wind (nach Tempo), E-Bike-Surren (nach Modus),
+Grollen in der Apokalypse, Fanfare beim Fake-Sieg. M = Ton aus/an.
 
 ## Pseudo-3D
 
@@ -80,7 +87,7 @@ Schritt 3: Rage-Bait-Mechaniken, jede einmal pro Run, an festen Streckenpunkten 
 |---|----------|----------|
 | 1 | 25 % | Fake-Abkürzung: Schild "Abkürzung -2 Min". Wer davor **springt**, biegt ab: Sackgasse, +3 Min Standzeit, Albert: "Ich warte oben. Mit Kaffee." |
 | 2 | 40 % | Rückenwind-Pickup: 3 s Boost (x1,6), dann 4 s Gegenwind (x0,5) |
-| 3 | 58 % | Strava-Popup "Segment verloren an Kevin", Kevin fährt vorbei, Eingabe 1 s gesperrt |
+| 3 | 58 % | Seitenwind-Böe: Lenkung 3 s vertauscht (links = rechts) |
 | 4 | 82 % | Garmin-Akku sinkt auf 1 %, dann 1 s schwarzer Bildschirm |
 | 5 | oben | Fake-Sieg (State `FAKE_WIN`): ab 39:52 und >96,5 % der Strecke Konfetti + "NEUE BESTZEIT!", dann springt der Timer auf 40:01 |
 | 6 | Ziel | Der Zielbogen rückt scheinbar weg, je näher man kommt |

@@ -165,15 +165,111 @@ function text(str, x, y, { size = 8, color = '#fff', align = 'left', shadow = tr
 // =====================================================================
 // Sound (WebAudio Chiptune-Beeps)
 // =====================================================================
+// Chiptune-Loop (Bass + Arpeggio + Kick): wird mit dem Fortschritt schneller und verzerrter,
+// in der Apokalypse nur noch tiefes Grollen und ein Basston
+const Music = {
+  step: 0, next: 0, timer: null, mg: null, shaper: null, distLvl: -1,
+  progress() { return state === 'APOCALYPSE' ? 1 : (state === 'PLAY' || state === 'FAKE_WIN') && typeof m !== 'undefined' && m ? clamp(m.pos / TRACK_LEN, 0, 1) : 0; },
+  start() {
+    const c = Sfx.ctx;
+    if (this.timer || !c) return;
+    this.mg = c.createGain(); this.mg.gain.value = 0.5;
+    this.shaper = c.createWaveShaper();
+    this.mg.connect(this.shaper); this.shaper.connect(Sfx.master);
+    this.setDist(0);
+    this.next = c.currentTime + 0.1;
+    this.timer = setInterval(() => this.tick(), 40);
+  },
+  setDist(p) {                                                      // Verzerrung wächst mit dem Fortschritt
+    const lvl = Math.round(p * 10);
+    if (lvl === this.distLvl) return;
+    this.distLvl = lvl;
+    const k = lvl * 6, n = 256, curve = new Float32Array(n);
+    for (let i = 0; i < n; i++) { const x = i / (n - 1) * 2 - 1; curve[i] = (1 + k) * x / (1 + k * Math.abs(x)); }
+    this.shaper.curve = curve;
+  },
+  note(freq, dur, type, vol, t, slide = 0) {
+    const c = Sfx.ctx, o = c.createOscillator(), g = c.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(freq, t);
+    if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(this.mg);
+    o.start(t); o.stop(t + dur + 0.02);
+  },
+  tick() {
+    const c = Sfx.ctx;
+    if (!c) return;
+    const p = this.progress();
+    this.setDist(p);
+    while (this.next < c.currentTime + 0.15) {
+      this.play(this.step++, this.next, p);
+      this.next += 60 / (state === 'APOCALYPSE' ? 70 : 104 + 56 * p) / 4;
+    }
+  },
+  play(step, t, p) {
+    const s16 = step % 16, bar = Math.floor(step / 16) % 4;
+    const bass = [55, 43.65, 65.41, 49][bar], chord = [[220, 261.63, 329.63], [174.61, 220, 261.63], [261.63, 329.63, 392], [196, 246.94, 293.66]][bar];
+    if (state === 'GAMEOVER') { if (s16 === 0) this.note(bass / 2, 1.6, 'triangle', 0.16, t); return; }
+    if (state === 'APOCALYPSE') { if (s16 % 4 === 0) this.note(bass / 2, 0.5, 'sawtooth', 0.12, t); return; }
+    if ([0, 3, 6, 8, 11, 14].includes(s16)) this.note(bass * (s16 === 8 ? 2 : 1), 0.14, p > 0.5 ? 'sawtooth' : 'triangle', 0.1, t);
+    if (s16 % 4 === 0) this.note(130, 0.1, 'sine', 0.14, t, 40);   // Kick
+    this.note(chord[[0, 1, 2, 1][step % 4]] * (p > 0.5 && step % 2 ? 2 : 1), 0.08, 'square', 0.035, t);   // Arpeggio
+  },
+};
+
 const Sfx = {
   ctx: null,
   muted: false,
+  master: null, windG: null, motorG: null, motorO: null, rumbleG: null,
+  // Ton startet erst nach der ersten Eingabe (Browser-Autoplay-Regel)
   unlock() {
     if (!this.ctx) {
       const AC = window.AudioContext || window.webkitAudioContext;
-      if (AC) this.ctx = new AC();
+      if (AC) {
+        this.ctx = new AC();
+        this.master = this.ctx.createGain();
+        this.master.gain.value = this.muted ? 0 : 1;
+        this.master.connect(this.ctx.destination);
+        this.initLoops();
+        Music.start();
+      }
     }
     if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+  },
+  setMuted(v) {
+    this.muted = v;
+    if (this.master) this.master.gain.value = v ? 0 : 1;
+  },
+  // Dauerhafte Klänge: Wind (Rauschen, lauter mit Tempo), E-Bike-Surren, Grollen in der Apokalypse
+  initLoops() {
+    const c = this.ctx;
+    const buf = c.createBuffer(1, c.sampleRate * 2, c.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    const src = c.createBufferSource(); src.buffer = buf; src.loop = true;
+    const bp = c.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 700; bp.Q.value = 0.6;
+    this.windG = c.createGain(); this.windG.gain.value = 0;
+    src.connect(bp); bp.connect(this.windG); this.windG.connect(this.master); src.start();
+    this.motorO = c.createOscillator(); this.motorO.type = 'sawtooth'; this.motorO.frequency.value = 90;
+    const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 420;
+    this.motorG = c.createGain(); this.motorG.gain.value = 0;
+    this.motorO.connect(lp); lp.connect(this.motorG); this.motorG.connect(this.master); this.motorO.start();
+    const r = c.createOscillator(); r.type = 'sawtooth'; r.frequency.value = 38;
+    const rl = c.createBiquadFilter(); rl.type = 'lowpass'; rl.frequency.value = 160;
+    this.rumbleG = c.createGain(); this.rumbleG.gain.value = 0;
+    r.connect(rl); rl.connect(this.rumbleG); this.rumbleG.connect(this.master); r.start();
+  },
+  // Pro Frame: Wind nach Tempo, Motorsurren nach Modus, Grollen im Weltuntergang
+  sync() {
+    if (!this.ctx || !this.windG || typeof m === 'undefined' || !m) return;
+    const t = this.ctx.currentTime, playing = state === 'PLAY' || state === 'FAKE_WIN';
+    this.windG.gain.setTargetAtTime(playing ? clamp(m.speed / MARKO_VMAX, 0, 1) * 0.07 : 0, t, 0.15);
+    const live = playing && state === 'PLAY' && m.mode > 0 && m.bat > 0;
+    this.motorG.gain.setTargetAtTime(live ? 0.035 : 0, t, 0.08);
+    this.motorO.frequency.setTargetAtTime(70 + m.mode * 24 + m.speed * 0.15, t, 0.1);
+    const rum = state === 'APOCALYPSE' ? 0.05 + 0.2 * clamp(stateTime / APOC_T, 0, 1) : state === 'GAMEOVER' ? Math.max(0, 0.12 - stateTime * 0.03) : 0;
+    this.rumbleG.gain.setTargetAtTime(rum, t, 0.2);
   },
   tone(freq, dur, { type = 'square', vol = 0.06, slide = 0, delay = 0 } = {}) {
     if (!this.ctx || this.muted) return;
@@ -186,11 +282,11 @@ const Sfx = {
     g.gain.setValueAtTime(vol, t0);
     g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
     o.connect(g);
-    g.connect(this.ctx.destination);
+    g.connect(this.master);
     o.start(t0);
     o.stop(t0 + dur + 0.02);
   },
-  pedal(side) { this.tone(side === 'left' ? 180 : 215, 0.04, { type: 'triangle', vol: 0.06 }); },
+  pedal(side) { this.tone(side === 'left' ? 1900 : 1500, 0.014, { type: 'square', vol: 0.016 }); this.tone(side === 'left' ? 120 : 140, 0.03, { type: 'triangle', vol: 0.03 }); },   // leises Klicken im Takt
   miss()      { this.tone(90, 0.07, { vol: 0.03 }); },
   jump()      { this.tone(300, 0.15, { slide: 400, vol: 0.05 }); },
   count()     { this.tone(440, 0.12); },
@@ -198,6 +294,7 @@ const Sfx = {
   checkpoint(){ [523, 659, 784].forEach((f, i) => this.tone(f, 0.1, { delay: i * 0.08 })); },
   talk()      { for (let i = 0; i < 4; i++) this.tone(260 + Math.random() * 240, 0.05, { delay: i * 0.065, vol: 0.035 }); },
   end()       { [392, 330, 262, 196].forEach((f, i) => this.tone(f, 0.25, { delay: i * 0.2, type: 'triangle', vol: 0.08 })); },
+  near()      { [880, 1175].forEach((f, i) => this.tone(f, 0.09, { delay: i * 0.08, vol: 0.06 })); },
   modeBeep(n) { this.tone(260 + n * 130, 0.12, { type: 'square', vol: 0.05 }); },
   motor()     { this.tone(90 + Math.random() * 12, 0.1, { type: 'sawtooth', vol: 0.03 }); },
   boom()      { this.tone(70, 1.4, { slide: -40, type: 'sawtooth', vol: 0.12 }); this.tone(45, 1.8, { type: 'square', vol: 0.08, delay: 0.2 }); },
@@ -238,7 +335,7 @@ addEventListener('keydown', (e) => {
   e.preventDefault();
   if (e.repeat) return;                              // gedrückt halten zählt nicht
   Sfx.unlock();
-  if (act === 'mute') { Sfx.muted = !Sfx.muted; return; }
+  if (act === 'mute') { Sfx.setMuted(!Sfx.muted); return; }
   actions.push(act);
 });
 addEventListener('keyup', (e) => {
@@ -293,8 +390,9 @@ function assetsReady() { return assetsLoaded >= assetsToLoad; }
 // phase schaltet bei Figuren die beiden Frames um (gerade/ungerade); fehlt ein Frame,
 // wird der andere weiterverwendet. Dazu ±1 px Auf und Ab im selben Takt.
 function drawBillboard(name, x, yBase, s, phase = 0) {
-  s = Math.round(s);
-  if (s < 2) return;
+  const base = (IMAGES[name + '_1'] || IMAGES[name] || IMAGES[name + '_2'] || {}).height || 64;
+  if (s < base * 0.125) return;
+  s = Math.round(base * Math.max(0.25, Math.round(s / base / 0.25) * 0.25));   // Skalierfaktor in Viertelstufen
   const ok = (im) => im && im.complete && im.naturalWidth;
   const want = Math.floor(phase) % 2;
   const f1 = IMAGES[name + '_' + (want + 1)], f2 = IMAGES[name + '_' + (2 - want)];
@@ -345,7 +443,7 @@ const confetti = [];
 const speech = { text: '', timer: 0, cooldown: 0, last: {} };
 
 function resetRace() {
-  m = { hr: 140, bat: 100, mode: 0, motorOn: false, x: 0, steer: 0, pos: 0, speed: 0, cadence: 0, lastSide: null, lastStrokeT: -10, y: 0, vy: 0, phase: 0, guarded: false, windMul: 1, stun: 0, hitT: 0, shake: 0 };
+  m = { flow: 0, hr: 140, bat: 100, mode: 0, motorOn: false, x: 0, steer: 0, pos: 0, speed: 0, cadence: 0, lastSide: null, lastStrokeT: -10, y: 0, vy: 0, phase: 0, guarded: false, windMul: 1, stun: 0, hitT: 0, shake: 0 };
   a = { anim: 0, x: 0, pos: GAP_REF * 5, speed: 0, finished: false, look: 0, lookIn: rand(3, 6), phase: 0 };
   race = {
     t: 0, countdown: 3,
@@ -354,7 +452,8 @@ function resetRace() {
     result: null,
     obs: makeObstacles(),
     shame: 0, motorFlag: false, msg: null, grin: 0, pulsIn: 20,
-    pens: [], toast: null, penTotal: 0, meteors: makeMeteors(),
+    gapPrev: 5, gapV: 0, nearOn: false, nearT: 0,
+    firstStroke: -1, pens: [], toast: null, penTotal: 0, meteors: makeMeteors(),
     fakeWin: false,
     fake: { base: 0, flipped: false, spawn: 0 },
     // Rage-Bait-Events, jedes läuft einmal: idle -> (aktive Phasen) -> done
@@ -395,14 +494,17 @@ function say(trigger, force = false, vars = {}) {
 // Marko
 // =====================================================================
 function stroke(side) {
+  if (race.firstStroke < 0) race.firstStroke = race.t;
   if (side === m.lastSide) {                        // zweimal dieselbe Seite: verschluckt
     m.cadence *= 0.7;
+    m.flow = 0;                                     // falsche Taste: Flow bricht ab
     Sfx.miss();
     return;
   }
   const dt = race.t - m.lastStrokeT;
   m.lastStrokeT = race.t;
   m.lastSide = side;
+  m.flow = dt < 0.4 ? Math.min(1, m.flow + 0.2) : Math.max(0, m.flow - 0.35);   // sauberer Wechsel baut Flow auf
   if (dt > 0) m.cadence = m.cadence * 0.6 + Math.min(14, 1 / dt) * 0.4;
   Sfx.pedal(side);
 }
@@ -524,10 +626,11 @@ function updateMarko(dt) {
 
   // Trittfrequenz fällt ab, wenn nicht getreten wird
   const since = race.t - m.lastStrokeT;
+  if (since > 0.6) m.flow = Math.max(0, m.flow - dt * 1.5);          // zu langsam: Flow läuft aus
   if (since > 1.5) m.cadence = 0;
   else if (since > 0) m.cadence = Math.min(m.cadence, 1 / since);
 
-  const target = MARKO_VMAX * Math.pow(Math.min(1, m.cadence / CADENCE_FULL), 0.4) * (live ? 1 + MODE_BOOST[m.mode] : 1) * m.windMul * (m.stun > 0 ? 0.15 : 1) * (Math.abs(m.x) > 1 ? OFFROAD_MUL : 1);
+  const target = MARKO_VMAX * Math.pow(Math.min(1, m.cadence / CADENCE_FULL), 0.4) * (live ? 1 + MODE_BOOST[m.mode] : 1) * (m.flow >= 0.6 ? 1.05 : 1) * m.windMul * (m.stun > 0 ? 0.15 : 1) * (Math.abs(m.x) > 1 ? OFFROAD_MUL : 1);
   m.speed += (target - m.speed) * (target > m.speed ? ACCEL : DECEL) * dt;
 
   // Unsichtbare Gegenwind-Linie: weich abbremsen, hart begrenzen
@@ -562,6 +665,16 @@ function updateMarko(dt) {
 // =====================================================================
 // Albert: Rubber-Banding
 // =====================================================================
+// Abstandstrend zu Albert (s pro s): negativ = Marko holt auf; "NAH DRAN!" unter 1 s
+function updateGapTrend(dt) {
+  const g = gapSeconds();
+  race.gapV += (((g - race.gapPrev) / dt) - race.gapV) * Math.min(1, dt * 2.5);
+  race.gapPrev = g;
+  race.nearT = Math.max(0, race.nearT - dt);
+  if (g < 1 && !race.nearOn) { race.nearOn = true; race.nearT = 2; Sfx.near(); }
+  else if (g > 1.6) race.nearOn = false;
+}
+
 function gapSeconds() { return (a.pos - m.pos) / GAP_REF; }
 
 function updateAlbert(dt) {
@@ -774,6 +887,7 @@ const States = {
       }
       updateMarko(dt);
       updateAlbert(dt);
+      updateGapTrend(dt);
       updateWorld(dt);
 
       // 5. Fake-Sieg: Marko ist (fast) oben, die Uhr zeigt 39:5x
@@ -789,6 +903,7 @@ const States = {
       drawHud();
       drawEventHud();
       drawModeMsg();
+      drawRhythm();
       drawHints();
       if (race.countdown > 0) drawCountdown();
       else if (race.t < 1) text('LOS!', W / 2, 60, { size: 22, color: '#ff5', align: 'center' });
@@ -846,7 +961,7 @@ const States = {
       drawCockpit();
       drawHud();
       const f = clamp((stateTime - (APOC_T - 1.4)) / 1.4, 0, 1);
-      if (f > 0) { ctx.globalAlpha = f; px(0, 0, W, H, '#fff'); ctx.globalAlpha = 1; u.clearRect(0, 0, W, H); }
+      if (f > 0) { u.globalAlpha = f; u.fillStyle = '#fff'; u.fillRect(0, 0, W, H); u.globalAlpha = 1; }   // Weiß über Bild und Text
     },
   },
 
@@ -885,7 +1000,7 @@ function curveAt(p) {
   const gain = 0.35 + 1.25 * frac;
   let c = 0.0009 * (Math.sin(p / 380) + 0.7 * Math.sin(p / 137 + 2));
   const ser = clamp((frac - 0.68) / 0.06, 0, 1);                 // ab ~70 %: Serpentinen
-  c = c * (1 - 0.5 * ser) + ser * 0.0011 * Math.sin(p / 70);
+  c = c * (1 - 0.5 * ser) + ser * 0.0014 * Math.sin(p / 70);
   return Math.min(1, p / 400) * gain * c;
 }
 
@@ -928,8 +1043,8 @@ function lerpColor(c1, c2, t) {
 function doomLevel() { return state === 'APOCALYPSE' || state === 'GAMEOVER' ? Math.min(1, stateTime / 1.5) : 0; }
 
 function drawBackground() {
-  const warm = clamp(m.pos / TRACK_LEN, 0, 1), doom = doomLevel();
-  const fire = clamp((m.pos / TRACK_LEN - 0.15) / 0.3, 0, 1) * 0.85;      // ab Horben orange
+  const frac = clamp(m.pos / TRACK_LEN, 0, 1), warm = clamp((frac - 0.05) / 0.37, 0, 1), doom = doomLevel();
+  const fire = clamp((frac - 0.42) / 0.28, 0, 1) * 0.9;                   // Kappel: orange
   SKY.forEach((c, i) => px(0, i * 10, W, 10, lerpColor(lerpColor(lerpColor(c, SKY_WARM[i], warm), SKY_FIRE[i], fire), SKY_DOOM[i], doom)));
   const sun = lerpColor('#fff3b0', '#ff9a50', warm);
   px(262, 22 + Math.round(warm * 20), 12, 12, sun);
@@ -951,21 +1066,41 @@ function drawBackground() {
     const h = Math.round(farHills[(x * 2 + mo + 200) % HILL_PERIOD] * 0.45);
     px(x, HOR + 1 - h, 1, h, midC);
   }
+  // Dunstschleier über den Bergen (gestuft)
+  const hz = lerpColor(lerpColor('#e8f2ff', '#ffd9b0', warm), '#7a2a20', Math.max(doom, fire * 0.6)).slice(1);
+  const hr = parseInt(hz.slice(0, 2), 16), hg = parseInt(hz.slice(2, 4), 16), hb = parseInt(hz.slice(4), 16);
+  [0.10, 0.18, 0.27, 0.38].forEach((al, i) => px(0, HOR - 11 + i * 3, W, 3, 'rgba(' + hr + ',' + hg + ',' + hb + ',' + al + ')'));
   px(0, HOR - 2, W, 3, '#24502f');
 }
 
+// Schwarzwald-Landstraße: weiße Randlinie, gestrichelte Mittellinie, Schotterstreifen, dann Wiese;
+// Asphalt mit Flicken und Rissen
 function renderRoad() {
   const base = m.pos * VIS, qw = quakeAmp() * 0.8;
   const dirt = race.ev.sc.dx > 0;
   for (let y = HOR + 1; y < H; y++) {
     const d = rowD[y], p = base + d, k = FOCAL / d;
     const stripe = Math.floor(p / 6) % 2 === 0;
-    const cx = W / 2 + (rowLat[y] - camX) * k + (qw ? Math.round(Math.sin(y * 0.5 + stateTime * 18) * qw) : 0), hw = ROAD_HW * k, kerb = Math.max(1, 0.4 * k);
+    const cx = W / 2 + (rowLat[y] - camX) * k + (qw ? Math.round(Math.sin(y * 0.5 + stateTime * 18) * qw) : 0);
+    const hw = ROAD_HW * k, gw = 1.1 * k;
     px(0, y, W, 1, dirt ? (stripe ? '#4d7a2e' : '#477229') : (stripe ? '#3f7d34' : '#488a3a'));
-    px(Math.round(cx - hw - kerb), y, Math.round(kerb), 1, stripe ? '#e33' : '#fff');
-    px(Math.round(cx + hw), y, Math.round(kerb), 1, stripe ? '#e33' : '#fff');
-    px(Math.round(cx - hw), y, Math.round(hw * 2), 1, dirt ? (stripe ? '#8a6a45' : '#80613f') : (stripe ? '#5a5b60' : '#55565b'));
-    if (!dirt && Math.floor(p / 5) % 2 === 0) px(Math.round(cx - 0.06 * k), y, Math.max(1, Math.round(0.12 * k)), 1, '#e8e8e8');
+    const grav = stripe ? '#8c806b' : '#847862';
+    px(Math.round(cx - hw - gw), y, Math.round(gw), 1, grav);       // Schotter-/Erdstreifen
+    px(Math.round(cx + hw), y, Math.round(gw), 1, grav);
+    const seg = Math.floor(p / 9), hs = hash(seg * 5 + 2);
+    let asphalt = hs > 0.66 ? '#5c5d62' : hs > 0.33 ? '#56575c' : '#515257';
+    if (dirt) asphalt = stripe ? '#8a6a45' : '#80613f';
+    px(Math.round(cx - hw), y, Math.round(hw * 2), 1, asphalt);
+    if (!dirt) {
+      if (hash(seg * 3 + 1) > 0.9 && Math.floor(p / 3) % 4 !== 0)      // Flicken
+        px(Math.round(cx + (hash(seg + 9) * 4 - 2) * k), y, Math.max(2, Math.round(1.3 * k)), 1, '#46474c');
+      const ck = Math.floor(p / 2.5);
+      if (hash(ck + 31) > 0.97) px(Math.round(cx + (hash(ck + 5) * 2 - 1) * hw * 0.8), y, Math.max(1, Math.round(0.12 * k)), 1, '#2d2d31');   // Riss
+      const ew = Math.max(1, Math.round(0.14 * k));
+      px(Math.round(cx - hw + 0.2 * k), y, ew, 1, '#e8e8e8');         // durchgezogene weiße Randlinien
+      px(Math.round(cx + hw - 0.2 * k) - ew, y, ew, 1, '#e8e8e8');
+      if (Math.floor(p / 4) % 2 === 0) px(Math.round(cx - 0.06 * k), y, Math.max(1, Math.round(0.12 * k)), 1, '#e8e8e8');   // gestrichelte Mitte
+    }
   }
 }
 
@@ -1030,27 +1165,123 @@ function archD() {
 }
 
 // Sammelt alle Billboards mit Entfernung; gezeichnet wird von hinten nach vorn
+// Randobjekte werden nie größer als ~40 % der Bildhöhe: kurz davor ausblenden
+const MAX_BB_PX = Math.round(H * 0.4);
+function capAlpha(sz) { return sz <= MAX_BB_PX * 0.8 ? 1 : clamp((MAX_BB_PX - sz) / (MAX_BB_PX * 0.2), 0, 1); }
+
+// 1-px-Linie (Bresenham) im Pixel-Look
+function pxLine(x0, y0, x1, y1, c, t = 1) {
+  x0 = Math.round(x0); y0 = Math.round(y0); x1 = Math.round(x1); y1 = Math.round(y1);
+  const dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0), sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy;
+  for (let n = 0; n < 500; n++) {
+    px(x0, y0, 1, t, c);
+    if (x0 === x1 && y0 === y1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x0 += sx; }
+    if (e2 <= dx) { err += dx; y0 += sy; }
+  }
+}
+
+// Schilder am Straßenrand (per Code): km-Schild, Steigung, Achtung Kühe, Bushaltestelle
+const PROPS = [];
+for (let k = 1; k <= 11; k++) PROPS.push({ pos: k * 1000, side: 1, kind: 'km', label: 'Gipfel ' + (12 - k) + ' km' });
+[[2500, '6%'], [5200, '8%'], [7900, '10%'], [10200, '8%']].forEach(([pos, label]) => PROPS.push({ pos, side: -1, kind: 'slope', label }));
+PROPS.push({ pos: 0.18 * TRACK_LEN, side: 1, kind: 'cows', label: 'Kühe' });
+PROPS.push({ pos: 0.41 * TRACK_LEN, side: 1, kind: 'bus', label: 'Horben' });
+
+function drawProp(o, dd) {
+  const g = groundPoint(o.side * (ROAD_HW + 1.9), dd), k = g.k, a = capAlpha(3.4 * k);
+  if (a <= 0) return;
+  ctx.globalAlpha = a;
+  const x = Math.round(g.x), y = Math.round(g.y), r = (v) => Math.round(v * k);
+  px(x - Math.max(1, r(0.07)), y - r(2.4), Math.max(1, r(0.14)), r(2.4), '#8a8e94');            // Pfosten
+  const sz = Math.min(9, 0.5 * k);
+  if (o.kind === 'km') {
+    px(x - r(1.5), y - r(3.4), r(3), r(1.2), '#111'); px(x - r(1.5) + 1, y - r(3.4) + 1, r(3) - 2, r(1.2) - 2, '#fff');
+    if (sz >= 4) text(o.label, x, y - r(2.8) - sz * 0.5, { size: Math.min(8, 0.46 * k), color: '#111', align: 'center', shadow: false });
+  } else if (o.kind === 'slope') {
+    px(x - r(0.9), y - r(3.6), r(1.8), r(1.8), '#d22'); px(x - r(0.9) + 2, y - r(3.6) + 2, r(1.8) - 4, r(1.8) - 4, '#fff');
+    if (sz >= 4) text(o.label, x, y - r(2.7) - sz * 0.5, { size: Math.min(9, 0.5 * k), color: '#111', align: 'center', shadow: false });
+  } else if (o.kind === 'cows') {                                     // Warndreieck
+    const h = r(2.0), top = y - r(3.8);
+    for (let i = 0; i < h; i++) {
+      const w = Math.round(i / h * r(1.0));
+      px(x - w, top + i, w * 2 + 1, 1, '#d22');
+      if (i > 2 && i < h - 2) { const wi = Math.max(0, w - 2); px(x - wi, top + i, wi * 2 + 1, 1, '#fff'); }
+    }
+    if (sz >= 4) text(o.label, x, top + h * 0.5, { size: Math.min(7, 0.34 * k), color: '#111', align: 'center', shadow: false });
+  } else {                                                            // Bushaltestelle
+    px(x - r(1.3), y - r(3.6), r(2.6), r(1.8), '#111'); px(x - r(1.3) + 1, y - r(3.6) + 1, r(2.6) - 2, r(1.8) - 2, '#f6d21a');
+    if (sz >= 4) {
+      text('H', x - r(0.85), y - r(3.55), { size: Math.min(9, 0.5 * k), color: '#165', shadow: false });
+      text(o.label, x + r(0.25), y - r(3.0), { size: Math.min(7, 0.34 * k), color: '#111', align: 'center', shadow: false });
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
 function collectBillboards(items) {
   const base = m.pos * VIS, ev = race.ev, sc = ev.sc;
   const add = (d, fn, max = DRAW_D) => { if (d > 2.2 && d < max) items.push({ d, fn }); };
 
-  // Tannen am Straßenrand
+  // Tannen am Straßenrand: weiter weg von der Straße, in 3 Tiefenreihen gestaffelt
   const TS = 16, i0 = Math.floor(base / TS);
   for (let i = i0 + 1; i < i0 + DRAW_D / TS + 1; i++) {
     for (const side of [-1, 1]) {
       const seed = i * 2 + (side > 0 ? 1 : 0);
-      if (hash(seed + 900) > 0.75) continue;
-      const d = i * TS + hash(seed) * TS * 0.6 - base;
-      const latM = side * (ROAD_HW + 1.8 + hash(seed + 500) * 6);
-      const hm = 5 + hash(seed + 77) * 4, dark = hash(seed + 31) > 0.5;
+      if (hash(seed + 900) > 0.78) continue;
+      const row = Math.floor(hash(seed + 11) * 3);
+      const d = i * TS + hash(seed) * TS * 0.6 + row * 3 - base;
+      const latM = side * (ROAD_HW + 4 + row * 4.5 + hash(seed + 500) * 2);
+      const hm = 4.6 + hash(seed + 77) * 2 + (2 - row) * 0.4, dark = hash(seed + 31) > 0.5;
       const burning = i * TS / VIS / TRACK_LEN > 0.42 && hash(seed + 55) > 0.35;   // ab Kappel brennen viele Tannen
       add(d, (dd) => {
         const g = groundPoint(latM, dd), tex = IMAGES[burning ? 'tree_burning' : 'tree'];
-        if (tex && tex.complete && tex.naturalWidth) drawBillboard(burning ? 'tree_burning' : 'tree', g.x, g.y, hm * g.k * 1.1);
-        else drawTree(g.x, g.y, hm * g.k, dark);
+        const sz = hm * g.k * 1.1, a = capAlpha(sz);
+        if (a <= 0) return;                                                   // zu nah: blendet aus statt riesig zu werden
+        ctx.globalAlpha = a;
+        if (tex && tex.complete && tex.naturalWidth) drawBillboard(burning ? 'tree_burning' : 'tree', g.x, g.y, sz);
+        else drawTree(g.x, g.y, sz, dark);
+        ctx.globalAlpha = 1;
       });
     }
   }
+
+  // Leitpfosten: weiße Pfosten mit rotem Reflektor, alle 20 m beidseitig
+  for (let n = Math.floor(base / 20) + 1; n < Math.floor(base / 20) + DRAW_D / 20; n++) {
+    for (const side of [-1, 1]) {
+      add(n * 20 - base, (dd) => {
+        const g = groundPoint(side * (ROAD_HW + 1.0), dd), k = g.k, w = Math.max(1, Math.round(0.14 * k)), h = Math.max(2, Math.round(1.0 * k));
+        const x = Math.round(g.x - w / 2), y = Math.round(g.y);
+        px(x, y - h, w, h, '#f2f2f2'); px(x, y - h + Math.round(h * 0.18), w, Math.max(1, Math.round(h * 0.2)), '#d22');
+      });
+    }
+  }
+  // Holzzaun (abschnittsweise), Leitplanke in den Kurven
+  for (let n = Math.floor(base / 5) + 1; n < Math.floor(base / 5) + DRAW_D / 5; n++) {
+    const p = n * 5, blk = Math.floor(p / 80);
+    if (hash(blk * 7 + 3) > 0.8 && Math.floor((p + 5) / 80) === blk) {
+      const side = hash(blk + 13) > 0.5 ? 1 : -1, latM = side * (ROAD_HW + 2.2);
+      add(p - base, (dd) => {
+        const g = groundPoint(latM, dd), g2 = groundPoint(latM, dd + 5), w = Math.max(1, Math.round(0.14 * g.k));
+        px(Math.round(g.x), Math.round(g.y - 1.1 * g.k), w, Math.max(2, Math.round(1.1 * g.k)), '#6e5030');
+        for (const hh of [0.5, 0.95]) pxLine(g.x, g.y - hh * g.k, g2.x, g2.y - hh * g2.k, '#8a6a42');
+      });
+    }
+  }
+  for (let n = Math.floor(base / 4) + 1; n < Math.floor(base / 4) + DRAW_D / 4; n++) {
+    const p = n * 4, c = curveAt(p);
+    if (Math.abs(c) < 0.0007 || Math.abs(curveAt(p + 4)) < 0.0007) continue;
+    const latM = (c > 0 ? -1 : 1) * (ROAD_HW + 0.9);                    // Außenseite der Kurve
+    add(p - base, (dd) => {
+      const g = groundPoint(latM, dd), g2 = groundPoint(latM, dd + 4), w = Math.max(1, Math.round(0.14 * g.k));
+      px(Math.round(g.x), Math.round(g.y - 0.7 * g.k), w, Math.max(2, Math.round(0.7 * g.k)), '#7a7e84');
+      pxLine(g.x, g.y - 0.6 * g.k, g2.x, g2.y - 0.6 * g2.k, '#d6dadf', 2);
+    });
+  }
+  // Schilder (km, Steigung, Kühe, Haltestelle)
+  for (const o of PROPS) add((o.pos - m.pos) * VIS, (dd) => drawProp(o, dd));
 
   // Checkpoint-Schilder
   CHECKPOINTS.forEach((cp) => add((cp.at * TRACK_LEN - m.pos) * VIS, (dd) => {
@@ -1132,15 +1363,15 @@ function collectBillboards(items) {
   if (state === 'APOCALYPSE') {
     const d = Math.max(3, 140 - clamp(stateTime / (APOC_T - 1), 0, 1) * 137);
     add(d, (dd) => {
-      const g = groundPoint(0, dd), lift = dd / 140 * 30 * g.k;
-      drawBillboard('meteor', g.x, g.y - lift, 8 * g.k);
+      const g = groundPoint(0, dd), lift = dd / 140 * 9 * g.k;
+      drawBillboard("meteor", g.x, g.y - lift, 7 * g.k);
     });
   }
 }
 
 function drawScene() {
   ctx.save();
-  ctx.translate(0, Math.round(Math.sin(stateTime * 2.4) * 0.7));        // Atmung wippt das Bild minimal
+  ctx.translate(0, Math.round(Math.sin(stateTime * 2.4) * 0.7) + (state === 'PLAY' && race.t - m.lastStrokeT < 0.1 ? 1 : 0));   // Atmung + Tretrhythmus
   const qa = quakeAmp();
   if (qa > 0) ctx.translate(Math.round(rand(-qa, qa)), Math.round(rand(-qa, qa)));
   else if (state === 'PLAY' && m.shake > 0) ctx.translate(Math.round(rand(-2, 2)), Math.round(rand(-2, 2)));
@@ -1155,9 +1386,24 @@ function drawScene() {
   ctx.restore();
   const doom = doomLevel();
   if (doom > 0) { ctx.globalAlpha = 0.5 * doom; px(0, 0, W, H, '#5a0000'); ctx.globalAlpha = 1; }
+  drawFog();
   drawSpeedLines();
   drawSweatAndVignette();
   if (m.hitT > 0 && Math.floor(m.hitT * 20) % 2 === 0) { ctx.globalAlpha = 0.3; px(0, 0, W, H, '#f00'); ctx.globalAlpha = 1; }
+}
+
+// Nebelbänke an einzelnen Stellen der Strecke (halbtransparent, gestuft)
+const FOG_ZONES = [0.10, 0.32, 0.57, 0.88].map((f) => f * TRACK_LEN);
+function drawFog() {
+  if (state === 'TITLE') return;
+  let lvl = 0;
+  for (const c of FOG_ZONES) lvl = Math.max(lvl, 1 - Math.abs(m.pos - c) / 380);
+  if (lvl <= 0) return;
+  const fc = state === 'APOCALYPSE' || state === 'GAMEOVER' ? '120,40,30' : '226,232,238';
+  for (let y = HOR - 14; y < HOR + 64; y += 3) {
+    const a = 0.62 * lvl * (1 - Math.abs(y - (HOR + 6)) / 70);
+    if (a > 0.02) px(0, y, W, 3, 'rgba(' + fc + ',' + a.toFixed(2) + ')');
+  }
 }
 
 // Leichte Vignette und Schweißtropfen, die bei hohem Tempo übers Bild laufen
@@ -1169,12 +1415,11 @@ function drawSweatAndVignette() {
     vignette.addColorStop(1, 'rgba(0,0,0,0.38)');
   }
   ctx.fillStyle = vignette; ctx.fillRect(0, 0, W, H);
-  const f = m.speed / MARKO_VMAX;
-  if (f < 0.8 || state === 'GAMEOVER') return;
-  ctx.globalAlpha = 0.75;
-  for (let i = 0; i < 5; i++) {
-    const x = 18 + Math.floor(hash(i + 40) * 284), y = Math.floor((stateTime * (30 + hash(i) * 30) + hash(i + 3) * 160) % 170);
-    px(x, y, 1, 3, '#bfe4ff'); px(x, y + 3, 1, 1, '#fff');
+  if (m.hr <= 185 || state === 'GAMEOVER') return;
+  ctx.globalAlpha = 0.8;
+  for (let i = 0; i < 6; i++) {
+    const x = 30 + Math.floor(hash(i + 40) * 260), y = 112 + Math.floor((stateTime * (28 + hash(i) * 22) + hash(i + 3) * 70) % 74);
+    px(x, y, 2, 3, '#bfe4ff'); px(x, y + 3, 1, 2, '#bfe4ff'); px(x, y, 1, 1, '#fff');
   }
   ctx.globalAlpha = 1;
 }
@@ -1200,73 +1445,86 @@ function tape(x, y, w, h) {
   for (let yy = 0; yy < h; yy++) for (let xx = 0; xx < w; xx++) px(x + xx, y + yy, 1, 1, ((xx + yy) >> 1) % 2 ? '#2a2a2e' : '#4a4a50');
 }
 
-// Lenker (First-Person, Pixel-Look): Ober- und Unterlenker mit Lenkerband, Hoods + Bremshebel,
-// gelbe Handschuhe, Vorbau mit Schrauben, Gabel, Vorderrad mit Speichen-Flimmern, Garmin-Computer.
-// Kippt beim Lenken (~8°), wippt ±1 px im Takt der Tritte, vibriert bei Tempo, Rumpelpiste, Treffern.
+// Großer gelber Handschuh (30x28) mit Fingern, Daumen und Manschette; side: -1 links, 1 rechts
+function drawGlove(x, y, side) {
+  px(x + 3, y, 24, 2, '#fff2a0');                                  // Knöchel-Glanz
+  px(x + 1, y + 2, 28, 18, '#ffd400');
+  px(x, y + 5, 30, 14, '#ffd400');
+  for (const fx of [7, 14, 21]) px(x + fx, y + 8, 1, 12, '#c9a200');   // Finger
+  px(x + 2, y + 12, 26, 1, '#e6b800');
+  const tx = side < 0 ? x + 25 : x - 4;                             // Daumen innen
+  px(tx, y + 6, 9, 13, '#ffd400'); px(tx + (side < 0 ? 8 : 0), y + 7, 1, 11, '#c9a200'); px(tx, y + 6, 9, 1, '#fff2a0');
+  px(x + 1, y + 20, 28, 8, '#e0a800');                               // Manschette
+  px(x + 1, y + 20, 28, 1, '#8a7000'); px(x + 1, y + 26, 28, 2, '#8a7000');
+}
+
+// Lenker (First-Person, Pixel-Look): breiter Rennlenker mit Unterlenker-Bögen bis fast an die Bildränder,
+// Lenkerband (diagonal, zwei Grautöne), Hoods + Bremshebel, große gelbe Handschuhe, Vorbau mit zwei Schrauben,
+// Gabel, Vorderrad mit Speichen-Flimmern, kleiner Garmin mittig über dem Vorbau.
+// Kippt beim Lenken (~8°), Hände zucken im Tritt, Vibration bei Tempo, Ruck bei Kollision.
 function drawCockpit() {
   const sinceTap = race.t - m.lastStrokeT;
   const bob = sinceTap < 0.12 ? (m.lastSide === 'left' ? 1 : -1) : 0;
   let jx = 0, jy = 0;
   if (m.speed > MARKO_VMAX * 0.75) { jx += Math.round(rand(-0.6, 0.6)); jy += Math.round(rand(-0.6, 0.6)); }
   if (m.shake > 0 || quakeAmp() > 0 || (Math.abs(m.x) > 1 && m.speed > 5)) { jx += Math.round(rand(-2, 2)); jy += Math.round(rand(-1, 1)); }
+  if (m.hitT > HIT_BLINK_TIME - 0.12) jy += 5;                       // Ruck bei Kollision
   const tilt = m.steer * 0.14;
   const ox = Math.round(W / 2 + jx), oy = 160 + bob + jy;
   const gar = race.ev.garmin, flicker = (gar.phase === 'black' || gar.phase === 'low') && Math.floor(stateTime * 14) % 3 === 0;
+  const tapL = sinceTap < 0.1 && m.lastSide === 'left' ? 2 : 0, tapR = sinceTap < 0.1 && m.lastSide === 'right' ? 2 : 0;
 
   ctx.save();
   ctx.translate(ox, oy);
   ctx.rotate(tilt);
   // Vorderrad: Reifen, Felge, Speichen (flimmern mit dem Tempo)
   ctx.strokeStyle = '#111'; ctx.lineWidth = 6;
-  ctx.beginPath(); ctx.arc(0, 58, 50, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 62, 50, 0, Math.PI * 2); ctx.stroke();
   ctx.strokeStyle = '#a8a8b0'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.arc(0, 58, 45, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 62, 45, 0, Math.PI * 2); ctx.stroke();
   ctx.globalAlpha = 0.55; ctx.strokeStyle = '#c8c8d0';
   for (let k = 0; k < 12; k++) {
     const ang = m.phase * 2.5 + k * Math.PI / 6;
-    ctx.beginPath(); ctx.moveTo(Math.cos(ang) * 8, 58 + Math.sin(ang) * 8); ctx.lineTo(Math.cos(ang) * 45, 58 + Math.sin(ang) * 45); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(Math.cos(ang) * 8, 62 + Math.sin(ang) * 8); ctx.lineTo(Math.cos(ang) * 45, 62 + Math.sin(ang) * 45); ctx.stroke();
   }
   ctx.globalAlpha = 1;
   // Gabel und Steuerrohr
-  px(-19, 2, 4, 34, '#1c1c20'); px(15, 2, 4, 34, '#1c1c20');
-  px(-19, 0, 38, 4, '#2a2a30'); px(-19, 0, 38, 1, '#4a4a58');
+  px(-19, 4, 4, 34, '#1c1c20'); px(15, 4, 4, 34, '#1c1c20');
+  px(-19, 2, 38, 4, '#2a2a30'); px(-19, 2, 38, 1, '#4a4a58');
   px(-3, -8, 6, 14, '#30303a'); px(-3, -8, 1, 14, '#4a4a58');
-  // Vorbau mit Schrauben
-  px(-7, -16, 14, 9, '#6a6a72'); px(-7, -16, 14, 1, '#b0b0b8'); px(-7, -8, 14, 1, '#3a3a40');
-  for (const [bx, by] of [[-5, -14], [3, -14], [-5, -11], [3, -11]]) { px(bx, by, 2, 2, '#26262a'); px(bx, by, 1, 1, '#8a8a92'); }
-  // Oberlenker mit Lenkerband
-  tape(-34, -22, 68, 6);
-  // Unterlenker-Bögen: vom Oberlenker nach vorn/unten, dann zurück zur Mitte
-  for (let n = 0; n < 16; n++) {
-    const t = n / 15, ex = Math.round(2 + 6 * Math.sin(Math.PI * t) - 5 * t * t * t);
-    px(-34 - ex, -20 + n, 4, 1, n % 2 ? '#2a2a2e' : '#4a4a50');
-    px(30 + ex, -20 + n, 4, 1, n % 2 ? '#4a4a50' : '#2a2a2e');
+  // Vorbau mit zwei Schrauben
+  px(-9, -18, 18, 10, '#6a6a72'); px(-9, -18, 18, 1, '#b0b0b8'); px(-9, -9, 18, 1, '#3a3a40');
+  for (const bx of [-6, 3]) { px(bx, -15, 3, 3, '#26262a'); px(bx, -15, 1, 1, '#8a8a92'); }
+  // Oberlenker: breit bis fast an den Bildrand, Lenkerband mit diagonaler Wicklung
+  tape(-130, -22, 260, 7);
+  // Unterlenker-Bögen an den Enden: nach vorn/unten, dann zurück zur Mitte
+  for (let n = 0; n < 26; n++) {
+    const t = n / 25, ex = Math.round(6 * Math.sin(Math.PI * t) - 16 * t * t);
+    const c1 = n % 2 ? '#2a2a2e' : '#4a4a50', c2 = n % 2 ? '#4a4a50' : '#2a2a2e';
+    px(-135 - ex, -18 + n, 6, 1, c1); px(129 + ex, -18 + n, 6, 1, c2);
   }
-  // Hoods + Bremshebel
+  // Hoods + Bremshebel + Handschuhe
   for (const side of [-1, 1]) {
-    const hx = side < 0 ? -36 : 24;
-    px(hx + 2, -32, 10, 12, '#202024'); px(hx + 2, -32, 10, 1, '#3a3a40');
-    px(side < 0 ? -35 : 33, -18, 2, 18, '#9a9aa2'); px(side < 0 ? -35 : 33, -18, 1, 18, '#d0d0d8');
-    // gelbe Handschuhe
-    px(hx, -36, 14, 14, '#ffd400'); px(hx, -36, 14, 2, '#fff2a0');
-    px(hx, -29, 14, 1, '#e6b800'); px(hx, -26, 14, 1, '#c9a200'); px(hx, -23, 14, 1, '#c9a200');
-    px(hx + (side < 0 ? 12 : 0), -35, 2, 12, '#c9a200');
+    const hx = side < 0 ? -118 : 88, dy = side < 0 ? tapL : tapR;
+    px(hx + 4, -40, 22, 26, '#202024'); px(hx + 4, -40, 22, 1, '#3a3a40');
+    const lx = side < 0 ? hx + 6 : hx + 21;
+    px(lx, -14, 3, 32, '#9a9aa2'); px(lx, -14, 1, 32, '#d0d0d8');
+    drawGlove(hx, -46 + dy, side);
   }
-  // Garmin: Gehäuse mit Tasten, grünliches Display
-  px(-6, -20, 12, 4, '#444');
-  px(-32, -60, 64, 41, '#101014'); px(-32, -60, 64, 1, '#3a3a44'); px(-32, -19, 64, 1, '#05050a');
-  for (const by of [-52, -43]) { px(-34, by, 2, 6, '#555'); px(32, by, 2, 6, '#555'); }
-  px(-29, -57, 58, 32, flicker ? '#2b3328' : '#a8bda0');
+  // Garmin (klein, mittig über dem Vorbau)
+  px(-6, -26, 12, 8, '#444');
+  px(-24, -58, 48, 33, '#101014'); px(-24, -58, 48, 1, '#3a3a44'); px(-24, -26, 48, 1, '#05050a');
+  for (const by of [-50, -41]) { px(-26, by, 2, 5, '#555'); px(24, by, 2, 5, '#555'); }
+  px(-22, -56, 44, 28, flicker ? '#2b3328' : '#a8bda0');
   if (!flicker) {
-    const bat = clamp(gar.bat, 0, 100);                           // Akku-Symbol
-    px(13, -55, 14, 7, '#1a2418'); px(27, -53, 2, 3, '#1a2418');
-    px(14, -54, Math.max(0, Math.round(12 * bat / 100)), 5, bat < 20 ? '#c22' : '#a8bda0');
-    px(14, -54, 12, 5, 'rgba(0,0,0,0)');
-    const hrHot = m.hr >= 190 && Math.floor(stateTime * 5) % 2 === 0;           // Herz
-    px(2, -43, 2, 1, hrHot ? '#c00' : '#2a3a28'); px(5, -43, 2, 1, hrHot ? '#c00' : '#2a3a28'); px(2, -42, 5, 2, hrHot ? '#c00' : '#2a3a28'); px(3, -40, 3, 1, hrHot ? '#c00' : '#2a3a28'); px(4, -39, 1, 1, hrHot ? '#c00' : '#2a3a28');
-    px(-27, -42, 1, 1, '#2a3a28'); px(-28, -41, 3, 1, '#2a3a28'); px(-29, -40, 5, 1, '#2a3a28');   // Steigungs-Dreieck
-    px(11, -34, 18, 8, MODE_COLOR[m.mode]);                                    // Modus-Chip
-    px(11, -34, 18, 1, 'rgba(255,255,255,0.4)');
+    const bat = clamp(gar.bat, 0, 100);                             // Akku-Symbol (Zeile 2 rechts)
+    px(13, -44, 8, 4, '#1a2418'); px(21, -43, 1, 2, '#1a2418');
+    px(14, -43, Math.max(0, Math.round(6 * bat / 100)), 2, bat < 20 ? '#c22' : '#a8bda0');
+    const hot = m.hr >= 190 && Math.floor(stateTime * 5) % 2 === 0, hc = hot ? '#c00' : '#2a3a28';   // Herz
+    px(-3, -45, 2, 1, hc); px(0, -45, 2, 1, hc); px(-3, -44, 5, 2, hc); px(-2, -42, 3, 1, hc); px(-1, -41, 1, 1, hc);
+    px(-21, -43, 1, 1, '#2a3a28'); px(-22, -42, 3, 1, '#2a3a28');   // Steigungs-Dreieck
+    px(9, -55, 13, 7, MODE_COLOR[m.mode]);                           // Modus-Chip oben rechts
+    px(9, -55, 13, 1, 'rgba(255,255,255,0.4)');
   }
   ctx.restore();
 
@@ -1274,13 +1532,12 @@ function drawCockpit() {
     const c = Math.cos(tilt), sn = Math.sin(tilt);
     const at = (x, y) => ({ x: Math.round(ox + x * c - y * sn), y: Math.round(oy + x * sn + y * c) });
     const T = (str, x, y, o) => { const q = at(x, y); text(str, q.x, q.y, { shadow: false, color: '#142014', ...o }); };
-    T(fmtNum(m.speed / TIME_SCALE * 3.6, 0), -27, -57, { size: 13 });
-    T('km/h', -11, -49, { size: 4.5 });
-    T(fmtNum(slopeAt(m.pos), 1) + '%', -22, -43, { size: 6 });
-    const hrHot = m.hr >= 190;
-    T(String(Math.round(m.hr)), 8, -43, { size: 6, color: hrHot && Math.floor(stateTime * 5) % 2 === 0 ? '#c00' : '#142014' });
-    T('Gipfel ' + fmtNum(Math.max(0, TRACK_LEN - m.pos) / 1000, 1) + 'km', -27, -32, { size: 5 });
-    T(MODES[m.mode], 20, -33, { size: 4.5, color: m.mode === 3 ? '#111' : '#fff', align: 'center' });
+    T(fmtNum(m.speed / TIME_SCALE * 3.6, 0), -21, -56, { size: 10 });
+    T('km/h', -8, -49, { size: 4 });
+    T(MODES[m.mode], 15.5, -54.5, { size: 4, color: m.mode === 3 ? '#111' : '#fff', align: 'center' });
+    T(fmtNum(slopeAt(m.pos), 1) + '%', -18, -44, { size: 5 });
+    T(String(Math.round(m.hr)), 3, -44, { size: 5.5, color: m.hr >= 190 && Math.floor(stateTime * 5) % 2 === 0 ? '#c00' : '#142014' });
+    T('Gipfel ' + fmtNum(Math.max(0, TRACK_LEN - m.pos) / 1000, 1) + ' km', -21, -34, { size: 4.2 });
   }
 }
 
@@ -1500,16 +1757,29 @@ function drawHud() {
   drawDot(BAR_X + BAR_W * a.pos / TRACK_LEN, BAR_Y + 1, '#4af');             // Albert: blauer Punkt
   drawDot(BAR_X + BAR_W * m.pos / TRACK_LEN, BAR_Y + 1, '#ffd400');          // Marko: gelber Punkt
 
-  // Abstand zu Albert (mm:ss) im Pixelrahmen
+  // Abstand zu Albert (mm:ss) im Pixelrahmen: Pfeil + Farbe (grün = Marko holt auf, rot = Albert zieht weg)
   const g = Math.max(0, Math.round(gapSeconds()));
   const gapTxt = a.finished ? 'Albert: oben. Mit Kaffee.' : 'Albert +' + Math.floor(g / 60) + ':' + String(g % 60).padStart(2, '0');
-  const bw = a.finished ? 114 : 78, bx0 = W - bw - 4, by0 = 38;
-  px(bx0 - 2, by0 - 2, bw + 4, 15, '#8cf'); px(bx0 - 1, by0 - 1, bw + 2, 13, '#0a0f1c');
-  text(gapTxt, bx0 + bw / 2, by0 + 1.5, { size: 7, align: 'center', color: '#8cf' });
+  const closing = !a.finished && race.gapV < -0.15, away = !a.finished && race.gapV > 0.15;
+  const gc = closing ? '#5f5' : away ? '#f66' : '#8cf';
+  const bw = a.finished ? 114 : 90, bx0 = W - bw - 4, by0 = 42;
+  px(bx0 - 2, by0 - 2, bw + 4, 15, gc); px(bx0 - 1, by0 - 1, bw + 2, 13, '#0a0f1c');
+  if (!a.finished) {                                                  // Pfeil als Pixelgrafik
+    if (closing) { px(bx0 + 6, by0 + 1, 1, 1, gc); px(bx0 + 5, by0 + 2, 3, 1, gc); px(bx0 + 4, by0 + 3, 5, 1, gc); px(bx0 + 6, by0 + 4, 1, 5, gc); }
+    else if (away) { px(bx0 + 6, by0 + 1, 1, 5, gc); px(bx0 + 4, by0 + 6, 5, 1, gc); px(bx0 + 5, by0 + 7, 3, 1, gc); px(bx0 + 6, by0 + 8, 1, 1, gc); }
+    else px(bx0 + 4, by0 + 4, 5, 1, gc);
+  }
+  text(gapTxt, bx0 + bw / 2 + (a.finished ? 0 : 6), by0 + 1.5, { size: 7, align: 'center', color: gc });
+  if (race.nearT > 0 && Math.floor(stateTime * 6) % 2 === 0) text('NAH DRAN!', bx0 + bw / 2, by0 + 17, { size: 8, align: 'center', color: '#5f5' });
+  else if (away && race.gapPrev > 4 && race.nearT <= 0) text('Albert zieht davon...', bx0 + bw / 2, by0 + 17, { size: 6, align: 'center', color: '#f66' });
 
-  // Zeitstrafen: rote Zahlen, die kurz aufblitzen
+  // Zeitstrafen: große rote Zahlen mit Schatten, schweben nach oben
   race.pens.forEach((q, i) => {
-    if (Math.floor(q.t * 12) % 2 === 0 || q.t > 0.6) text(q.txt, 4, 19 + i * 10 - Math.round(q.t * 6), { size: 9, color: '#f33' });
+    const k = q.t / PEN_SHOW, y = 96 - k * 50 - i * 16, x = W / 2 - 26;
+    u.globalAlpha = k > 0.7 ? (1 - k) / 0.3 : 1;
+    text(q.txt, x + 1.5, y + 1.5, { size: 17, color: '#000', shadow: false });
+    text(q.txt, x, y, { size: 17, color: '#ff3030' });
+    u.globalAlpha = 1;
   });
 
   // E-Bike-Akku und PEINLICH-Balken
@@ -1523,18 +1793,31 @@ function drawHud() {
   const full = race.shame >= 100 && Math.floor(stateTime * 6) % 2 === 0;
   bar(168, 'PEINLICH', race.shame, full ? '#fff' : '#f4a', '#f9c');
 
-  if (Sfx.muted) text('stumm (M)', W - 4, 56, { size: 5, align: 'right', color: '#ccc' });
+  if (Sfx.muted) text('stumm (M)', W - 4, 72, { size: 5, align: 'right', color: '#ccc' });
+}
+
+// Rhythmus-Anzeige: welche Taste ist als Nächstes dran (blinkend) + Flow-Balken neben dem Garmin
+function drawRhythm() {
+  if (race.countdown > 0) return;
+  const next = m.lastSide === 'left' ? 'right' : m.lastSide === 'right' ? 'left' : null;
+  const blink = Math.floor(stateTime * 6) % 2 === 0;
+  keycap('A', W / 2 - 15, 88, 12, 11, (!next || next === 'left') && blink);
+  keycap('D', W / 2 + 3, 88, 12, 11, (!next || next === 'right') && blink);
+  const fx = 192, fy = 110, act = m.flow >= 0.6;
+  text('FLOW', fx, fy - 7, { size: 4.5, color: act ? '#5f5' : '#ccc' });
+  px(fx - 1, fy - 1, 42, 6, '#111'); px(fx, fy, 40, 4, '#333');
+  px(fx, fy, Math.round(40 * m.flow), 4, act && Math.floor(stateTime * 8) % 2 ? '#fff' : act ? '#5f5' : '#9cf');
 }
 
 function drawHints() {
-  if (race.t >= 8) return;
-  const alpha = Math.min(1, 8 - race.t);
+  const off = race.firstStroke >= 0 ? race.firstStroke : 8;        // sobald Marko tritt, spätestens nach 8 s
+  const alpha = clamp(1 - (race.t - Math.min(8, off)) / 0.8, 0, 1);
+  if (alpha <= 0) return;
+  const str = 'A / D tippen · ← → lenken · Leertaste = E-Bike (peinlich)';
   u.globalAlpha = alpha; ctx.globalAlpha = alpha;
-  ['A / D tippen', '← → lenken', 'Leertaste = E-Bike (peinlich)'].forEach((t, i) => {
-    const y = 138 + i * 11;
-    px(0, y - 1, 124, 10, 'rgba(0,0,0,0.6)');
-    text(t, 4, y + 0.5, { size: 6.5, color: '#ffd400' });
-  });
+  const bw = 232;
+  px(W / 2 - bw / 2, 72, bw, 11, 'rgba(0,0,0,0.6)');
+  text(str, W / 2, 74, { size: 6, color: '#ffd400', align: 'center' });
   u.globalAlpha = 1; ctx.globalAlpha = 1;
 }
 
@@ -1610,6 +1893,7 @@ function update(dt) {
   if (acts.includes('restart') && state !== 'LOADING') { setState('PLAY'); return; }     // R = neu starten
   stateTime += dt;
   States[state].update(dt, acts);
+  Sfx.sync();
 }
 
 function render() {
