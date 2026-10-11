@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>Marko am Schauinsland</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="stage">
+    <!-- Pixel-Ebene: 320x180, hochskaliert mit image-rendering: pixelated -->
+    <canvas id="game" width="320" height="180"></canvas>
+    <!-- Text-Ebene: gleiche Koordinaten, aber in voller Auflösung, damit Schrift lesbar bleibt -->
+    <canvas id="ui"></canvas>
+  </div>
+  <script src="lines.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>

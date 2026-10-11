@@ -1,0 +1,40 @@
+html, body {
+  margin: 0;
+  height: 100%;
+  background: #111;
+  overflow: hidden;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Größe wird von game.js gesetzt (bevorzugt ganzzahlige Skalierung) */
+#stage {
+  position: relative;
+  width: 320px;
+  height: 180px;
+}
+
+#stage canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+#game {
+  image-rendering: crisp-edges;
+  image-rendering: pixelated;
+}
+
+#ui {
+  pointer-events: none;
+}
